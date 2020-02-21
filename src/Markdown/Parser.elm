@@ -1,4 +1,7 @@
-module Markdown.Parser exposing (Renderer, defaultHtmlRenderer, deadEndToString, parse, render)
+module Markdown.Parser exposing
+    ( Renderer, deadEndToString, parse, render
+    , BasicRenderer, MarkdownSkeleton(..), fromBasicRenderer, renderMarkdownDefault
+    )
 
 {-|
 
@@ -19,7 +22,7 @@ import Markdown.Inline as Inline
 import Markdown.InlineParser
 import Markdown.ListItem as ListItem
 import Markdown.OrderedList
-import Markdown.RawBlock exposing (Attribute, RawBlock(..), UnparsedInlines(..))
+import Markdown.RawBlock as RawBlock exposing (Attribute, RawBlock, UnparsedInlines(..))
 import Markdown.UnorderedList
 import Parser
 import Parser.Advanced as Advanced exposing ((|.), (|=), Nestable(..), Step(..), andThen, chompIf, chompUntil, chompWhile, getChompedString, inContext, int, lazy, loop, map, multiComment, oneOf, problem, succeed, symbol, token)
@@ -40,31 +43,52 @@ You could render to any type you want. Here are some useful things you might ren
 
 -}
 type alias Renderer view =
-    { heading : { level : Block.HeadingLevel, rawText : String, children : List view } -> view
-    , paragraph : List view -> view
-    , blockQuote : List view -> view
-    , html : Markdown.Html.Renderer (List view -> view)
-    , text : String -> view
-    , codeSpan : String -> view
-    , strong : List view -> view
-    , emphasis : List view -> view
-    , hardLineBreak : view
-    , link : { title : Maybe String, destination : String } -> List view -> Result String view
-    , image : { alt : String, src : String, title : Maybe String } -> Result String view
-    , unorderedList : List (ListItem view) -> view
-    , orderedList : Int -> List (List view) -> view
-    , codeBlock : { body : String, language : Maybe String } -> view
-    , thematicBreak : view
+    { renderMarkdown : MarkdownSkeleton view -> Result String view
+    , renderHtml : Markdown.Html.Renderer (List view -> view)
     }
 
 
-{-| This renders `Html` in an attempt to be as close as possible to
+{-| -}
+type alias BasicRenderer view =
+    { renderMarkdown : MarkdownSkeleton view -> view
+    , renderHtml : Markdown.Html.Renderer (List view -> view)
+    }
+
+
+{-| -}
+fromBasicRenderer : BasicRenderer view -> Renderer view
+fromBasicRenderer renderer =
+    { renderHtml = renderer.renderHtml
+    , renderMarkdown = renderer.renderMarkdown >> Ok
+    }
+
+
+{-| A skeleton for parsed markdown
+-}
+type MarkdownSkeleton a
+    = Heading { level : Block.HeadingLevel, rawText : String, children : List a }
+    | Paragraph (List a)
+    | BlockQuote (List a)
+    | Text String
+    | CodeSpan String
+    | Strong (List a)
+    | Emphasis (List a)
+    | Link { title : Maybe String, destination : String, children : List a }
+    | Image { alt : String, src : String, title : Maybe String }
+    | UnorderedList { items : List (ListItem a) }
+    | OrderedList { startingIndex : Int, items : List (List a) }
+    | CodeBlock { body : String, language : Maybe String }
+    | HardLineBreak
+    | ThematicBreak
+
+
+{-| This renders markdown to `Html` in an attempt to be as close as possible to
 the HTML output in <https://github.github.com/gfm/>.
 -}
-defaultHtmlRenderer : Renderer (Html msg)
-defaultHtmlRenderer =
-    { heading =
-        \{ level, children } ->
+renderMarkdownDefault : MarkdownSkeleton (Html msg) -> Html msg
+renderMarkdownDefault markdown =
+    case markdown of
+        Heading { level, rawText, children } ->
             case level of
                 Block.H1 ->
                     Html.h1 [] children
@@ -83,31 +107,38 @@ defaultHtmlRenderer =
 
                 Block.H6 ->
                     Html.h6 [] children
-    , paragraph = Html.p []
-    , hardLineBreak = Html.br [] []
-    , blockQuote = Html.blockquote []
-    , strong =
-        \children -> Html.strong [] children
-    , emphasis =
-        \children -> Html.em [] children
-    , codeSpan =
-        \content -> Html.code [] [ Html.text content ]
-    , link =
-        \link content ->
+
+        Paragraph children ->
+            Html.p [] children
+
+        BlockQuote children ->
+            Html.blockquote [] children
+
+        Text content ->
+            Html.text content
+
+        CodeSpan content ->
+            Html.code [] [ Html.text content ]
+
+        Strong children ->
+            Html.strong [] children
+
+        Emphasis children ->
+            Html.em [] children
+
+        Link link ->
             case link.title of
                 Just title ->
                     Html.a
                         [ Attr.href link.destination
                         , Attr.title title
                         ]
-                        content
-                        |> Ok
+                        link.children
 
                 Nothing ->
-                    Html.a [ Attr.href link.destination ] content
-                        |> Ok
-    , image =
-        \imageInfo ->
+                    Html.a [ Attr.href link.destination ] link.children
+
+        Image imageInfo ->
             case imageInfo.title of
                 Just title ->
                     Html.img
@@ -116,7 +147,6 @@ defaultHtmlRenderer =
                         , Attr.title title
                         ]
                         []
-                        |> Ok
 
                 Nothing ->
                     Html.img
@@ -124,11 +154,8 @@ defaultHtmlRenderer =
                         , Attr.alt imageInfo.alt
                         ]
                         []
-                        |> Ok
-    , text =
-        Html.text
-    , unorderedList =
-        \items ->
+
+        UnorderedList { items } ->
             Html.ul []
                 (items
                     |> List.map
@@ -160,8 +187,8 @@ defaultHtmlRenderer =
                                     Html.li [] (checkbox :: children)
                         )
                 )
-    , orderedList =
-        \startingIndex items ->
+
+        OrderedList { startingIndex, items } ->
             Html.ol
                 (case startingIndex of
                     1 ->
@@ -177,16 +204,19 @@ defaultHtmlRenderer =
                                 itemBlocks
                         )
                 )
-    , html = Markdown.Html.oneOf []
-    , codeBlock =
-        \{ body, language } ->
+
+        CodeBlock { body, language } ->
             Html.pre []
                 [ Html.code []
                     [ Html.text body
                     ]
                 ]
-    , thematicBreak = Html.hr [] []
-    }
+
+        HardLineBreak ->
+            Html.br [] []
+
+        ThematicBreak ->
+            Html.hr [] []
 
 
 renderStyled : Renderer view -> List Inline -> Result String (List view)
@@ -225,40 +255,42 @@ renderSingleInline renderer inline =
         Block.Strong innerInlines ->
             innerInlines
                 |> renderStyled renderer
-                |> Result.map renderer.strong
+                |> Result.andThen (Strong >> renderer.renderMarkdown)
                 |> Just
 
         Block.Emphasis innerInlines ->
             innerInlines
                 |> renderStyled renderer
-                |> Result.map renderer.emphasis
+                |> Result.andThen (Emphasis >> renderer.renderMarkdown)
                 |> Just
 
         Block.Image src title children ->
-            renderer.image { alt = Block.extractText children, src = src, title = title }
+            Image { alt = Block.extractText children, src = src, title = title }
+                |> renderer.renderMarkdown
                 |> Just
 
         Block.Text string ->
-            renderer.text string
-                |> Ok
+            Text string
+                |> renderer.renderMarkdown
                 |> Just
 
         Block.CodeSpan string ->
-            renderer.codeSpan string
-                |> Ok
+            CodeSpan string
+                |> renderer.renderMarkdown
                 |> Just
 
         Block.Link destination title inlines ->
             renderStyled renderer inlines
                 |> Result.andThen
                     (\children ->
-                        renderer.link { title = title, destination = destination } children
+                        Link { title = title, destination = destination, children = children }
+                            |> renderer.renderMarkdown
                     )
                 |> Just
 
         Block.HardLineBreak ->
-            renderer.hardLineBreak
-                |> Ok
+            HardLineBreak
+                |> renderer.renderMarkdown
                 |> Just
 
         Block.HtmlInline html ->
@@ -294,19 +326,20 @@ renderHelper renderer blocks =
             case block of
                 Block.Heading level content ->
                     renderStyled renderer content
-                        |> Result.map
+                        |> Result.andThen
                             (\children ->
-                                renderer.heading
+                                Heading
                                     { level = level
                                     , rawText = Block.extractText content
                                     , children = children
                                     }
+                                    |> renderer.renderMarkdown
                             )
                         |> Just
 
                 Block.Paragraph content ->
                     renderStyled renderer content
-                        |> Result.map renderer.paragraph
+                        |> Result.andThen (Paragraph >> renderer.renderMarkdown)
                         |> Just
 
                 Block.HtmlBlock html ->
@@ -327,30 +360,38 @@ renderHelper renderer blocks =
                                     |> Result.map (\renderedBody -> Block.ListItem task renderedBody)
                             )
                         |> combineResults
-                        |> Result.map renderer.unorderedList
+                        |> Result.andThen
+                            (\children ->
+                                UnorderedList { items = children }
+                                    |> renderer.renderMarkdown
+                            )
                         |> Just
 
                 Block.OrderedList startingIndex items ->
                     items
                         |> List.map (renderStyled renderer)
                         |> combineResults
-                        |> Result.map (renderer.orderedList startingIndex)
+                        |> Result.andThen
+                            (\children ->
+                                OrderedList { startingIndex = startingIndex, items = children }
+                                    |> renderer.renderMarkdown
+                            )
                         |> Just
 
                 Block.CodeBlock codeBlock ->
-                    codeBlock
-                        |> renderer.codeBlock
-                        |> Ok
+                    CodeBlock codeBlock
+                        |> renderer.renderMarkdown
                         |> Just
 
                 Block.ThematicBreak ->
-                    Ok renderer.thematicBreak
+                    ThematicBreak
+                        |> renderer.renderMarkdown
                         |> Just
 
                 Block.BlockQuote nestedBlocks ->
                     renderHelper renderer nestedBlocks
                         |> combineResults
-                        |> Result.map renderer.blockQuote
+                        |> Result.andThen (BlockQuote >> renderer.renderMarkdown)
                         |> Just
         )
         blocks
@@ -457,7 +498,7 @@ renderHtmlNode renderer tag attributes children =
     renderHtml tag
         attributes
         children
-        renderer.html
+        renderer.renderHtml
         (renderHelper renderer children)
 
 
@@ -543,7 +584,7 @@ levelParser level =
 parseInlines : RawBlock -> Parser (Maybe Block)
 parseInlines rawBlock =
     case rawBlock of
-        Heading level unparsedInlines ->
+        RawBlock.Heading level unparsedInlines ->
             level
                 |> levelParser
                 |> andThen
@@ -553,17 +594,17 @@ parseInlines rawBlock =
                             |> (\styledLine -> just (Block.Heading parsedLevel styledLine))
                     )
 
-        Body unparsedInlines ->
+        RawBlock.Body unparsedInlines ->
             --Markdown.InlineParser.parse Dict.empty unparsedInlines
             unparsedInlines
                 |> inlineParseHelper
                 |> (\styledLine -> just (Block.Paragraph styledLine))
 
-        Html tagName attributes children ->
+        RawBlock.Html tagName attributes children ->
             Block.HtmlBlock (Block.HtmlElement tagName attributes children)
                 |> just
 
-        UnorderedListBlock unparsedItems ->
+        RawBlock.UnorderedListBlock unparsedItems ->
             unparsedItems
                 |> List.map
                     (\unparsedItem ->
@@ -590,24 +631,24 @@ parseInlines rawBlock =
                 |> map Block.UnorderedList
                 |> map Just
 
-        OrderedListBlock startingIndex unparsedInlines ->
+        RawBlock.OrderedListBlock startingIndex unparsedInlines ->
             unparsedInlines
                 |> List.map (parseRawInline identity)
                 |> combine
                 |> map (Block.OrderedList startingIndex)
                 |> map Just
 
-        CodeBlock codeBlock ->
+        RawBlock.CodeBlock codeBlock ->
             Block.CodeBlock codeBlock
                 |> just
 
-        ThematicBreak ->
+        RawBlock.ThematicBreak ->
             just Block.ThematicBreak
 
-        BlankLine ->
+        RawBlock.BlankLine ->
             succeed Nothing
 
-        BlockQuote rawBlocks ->
+        RawBlock.BlockQuote rawBlocks ->
             case Advanced.run rawBlockParser rawBlocks of
                 Ok value ->
                     parseAllInlines value
@@ -620,7 +661,7 @@ parseInlines rawBlock =
                 Err error ->
                     Advanced.problem (Parser.Problem (deadEndsToString error))
 
-        HtmlComment string ->
+        RawBlock.HtmlComment string ->
             Block.HtmlBlock (Block.HtmlComment string)
                 |> just
 
@@ -644,7 +685,7 @@ plainLine =
         (\rawLine ->
             rawLine
                 |> UnparsedInlines
-                |> Body
+                |> RawBlock.Body
         )
         |. Advanced.backtrackable
             (oneOf
@@ -670,7 +711,7 @@ innerParagraphParser =
 
 blockQuote : Parser RawBlock
 blockQuote =
-    succeed BlockQuote
+    succeed RawBlock.BlockQuote
         |. oneOf
             [ symbol (Advanced.Token "   > " (Parser.Expecting "   > "))
             , symbol (Advanced.Token "  > " (Parser.Expecting "  > "))
@@ -714,20 +755,20 @@ unorderedListBlock =
                             }
                 )
             )
-        |> map UnorderedListBlock
+        |> map RawBlock.UnorderedListBlock
 
 
 orderedListBlock : Maybe RawBlock -> Parser RawBlock
 orderedListBlock lastBlock =
     Markdown.OrderedList.parser lastBlock
-        |> map (\( startingIndex, unparsedLines ) -> OrderedListBlock startingIndex (List.map UnparsedInlines unparsedLines))
+        |> map (\( startingIndex, unparsedLines ) -> RawBlock.OrderedListBlock startingIndex (List.map UnparsedInlines unparsedLines))
 
 
 blankLine : Parser RawBlock
 blankLine =
     Advanced.backtrackable (chompWhile (\c -> Helpers.isSpaceOrTab c))
         |. token (Advanced.Token "\n" (Parser.Expecting "\\n"))
-        |> map (\() -> BlankLine)
+        |> map (\() -> RawBlock.BlankLine)
 
 
 htmlParser : Parser RawBlock
@@ -743,7 +784,7 @@ xmlNodeToHtmlNode parser =
             case xmlNode of
                 HtmlParser.Text innerText ->
                     -- TODO is this right?
-                    Body
+                    RawBlock.Body
                         (UnparsedInlines innerText)
                         |> Advanced.succeed
 
@@ -751,7 +792,7 @@ xmlNodeToHtmlNode parser =
                     Advanced.andThen
                         (\parsedChildren ->
                             Advanced.succeed
-                                (Html tag
+                                (RawBlock.Html tag
                                     attributes
                                     parsedChildren
                                 )
@@ -759,7 +800,7 @@ xmlNodeToHtmlNode parser =
                         (nodesToBlocksParser children)
 
                 Comment string ->
-                    succeed <| HtmlComment string
+                    succeed <| RawBlock.HtmlComment string
         )
         parser
 
@@ -797,7 +838,7 @@ childToParser node =
                         Advanced.succeed [ Block.HtmlElement tag attributes childrenAsBlocks |> Block.HtmlBlock ]
                     )
 
-        Text innerText ->
+        HtmlParser.Text innerText ->
             case Advanced.run multiParser2 innerText of
                 Ok value ->
                     succeed value
@@ -875,8 +916,8 @@ statementsHelp2 revStmts =
                             , revStmts
                             )
                         of
-                            ( CodeBlock block1, (CodeBlock block2) :: rest ) ->
-                                (CodeBlock
+                            ( RawBlock.CodeBlock block1, (RawBlock.CodeBlock block2) :: rest ) ->
+                                (RawBlock.CodeBlock
                                     { body = joinStringsPreserveIndentation block2.body block1.body
                                     , language = Nothing
                                     }
@@ -884,21 +925,21 @@ statementsHelp2 revStmts =
                                 )
                                     |> Loop
 
-                            ( Body (UnparsedInlines body1), (BlockQuote body2) :: rest ) ->
-                                (BlockQuote (joinRawStringsWith "\n" body2 body1)
+                            ( RawBlock.Body (UnparsedInlines body1), (RawBlock.BlockQuote body2) :: rest ) ->
+                                (RawBlock.BlockQuote (joinRawStringsWith "\n" body2 body1)
                                     :: rest
                                 )
                                     |> Loop
 
-                            ( BlockQuote body1, (BlockQuote body2) :: rest ) ->
-                                (BlockQuote (joinStringsPreserveAll body2 body1)
+                            ( RawBlock.BlockQuote body1, (RawBlock.BlockQuote body2) :: rest ) ->
+                                (RawBlock.BlockQuote (joinStringsPreserveAll body2 body1)
                                     :: rest
                                 )
                                     |> Loop
 
-                            ( Body (UnparsedInlines body1), (Body (UnparsedInlines body2)) :: rest ) ->
+                            ( RawBlock.Body (UnparsedInlines body1), (RawBlock.Body (UnparsedInlines body2)) :: rest ) ->
                                 Loop
-                                    (Body (UnparsedInlines (joinRawStringsWith "\n" body2 body1))
+                                    (RawBlock.Body (UnparsedInlines (joinRawStringsWith "\n" body2 body1))
                                         :: rest
                                     )
 
@@ -910,7 +951,7 @@ statementsHelp2 revStmts =
         [ Advanced.end (Parser.Expecting "End") |> map (\() -> Done revStmts)
         , blankLine |> keepLooping
         , blockQuote |> keepLooping
-        , Markdown.CodeBlock.parser |> map CodeBlock |> keepLooping
+        , Markdown.CodeBlock.parser |> map RawBlock.CodeBlock |> keepLooping
         , thematicBreak |> keepLooping
         , unorderedListBlock |> keepLooping
         , orderedListBlock (List.head revStmts) |> keepLooping
@@ -990,7 +1031,7 @@ joinRawStringsWith joinWith string1 string2 =
 
 thematicBreak : Parser RawBlock
 thematicBreak =
-    succeed ThematicBreak
+    succeed RawBlock.ThematicBreak
         |. Advanced.backtrackable
             (oneOf
                 [ symbol (Advanced.Token "   " (Parser.Problem "Expecting 3 spaces"))
@@ -1040,7 +1081,7 @@ thematicBreak =
 
 heading : Parser RawBlock
 heading =
-    succeed Heading
+    succeed RawBlock.Heading
         |. symbol (Advanced.Token "#" (Parser.Expecting "#"))
         |= (getChompedString
                 (succeed ()
