@@ -1,11 +1,8 @@
-module Markdown.Parser exposing
-    ( Renderer, deadEndToString, parse, render
-    , BasicRenderer, MarkdownSkeleton(..), fromBasicRenderer, renderMarkdownDefault
-    )
+module Markdown.Parser exposing (Renderer, BlockStructure(..), renderToHtml, deadEndToString, parse, render)
 
 {-|
 
-@docs Renderer, defaultHtmlRenderer, deadEndToString, parse, render
+@docs Renderer, BlockStructure, renderToHtml, deadEndToString, parse, render
 
 -}
 
@@ -29,12 +26,12 @@ import Parser.Advanced as Advanced exposing ((|.), (|=), Nestable(..), Step(..),
 import Parser.Extra exposing (oneOrMore, zeroOrMore)
 
 
-{-| A record with functions that define how to render all possible markdown blocks.
-These renderers are composed together to give you the final rendered output.
+{-| A record with a function that defines how to render all possible markdown blocks.
+This function is composed together to give you the final rendered output.
 
 You could render to any type you want. Here are some useful things you might render to:
 
-  - `Html` (using the `defaultHtmlRenderer` provided by this module)
+  - `Html` (using the `renderToHtml` provided by this module)
   - Custom `Html`
   - `Element`s from [`mdgriffith/elm-ui`](https://package.elm-lang.org/packages/mdgriffith/elm-ui/latest/)
   - Types from other custom HTML replacement libraries, like [`rtfeldman/elm-css`](https://package.elm-lang.org/packages/rtfeldman/elm-css/latest/) or [`tesk9/accessible-html`](https://package.elm-lang.org/packages/tesk9/accessible-html/latest/)
@@ -43,40 +40,31 @@ You could render to any type you want. Here are some useful things you might ren
 
 -}
 type alias Renderer view =
-    { renderMarkdown : MarkdownSkeleton view -> Result String view
+    { renderBlocks : BlockStructure view -> Result String view
     , renderHtml : Markdown.Html.Renderer (List view -> view)
     }
 
 
-{-| -}
-type alias BasicRenderer view =
-    { renderMarkdown : MarkdownSkeleton view -> view
-    , renderHtml : Markdown.Html.Renderer (List view -> view)
-    }
+{-| A datatype that enumerates all possible ways markdown could wrap some children.
 
+This does not include Html tags.
 
-{-| -}
-fromBasicRenderer : BasicRenderer view -> Renderer view
-fromBasicRenderer renderer =
-    { renderHtml = renderer.renderHtml
-    , renderMarkdown = renderer.renderMarkdown >> Ok
-    }
+It has a type parameter `children`, which is supposed to be filled with `String`,
+`Html msg` or similar.
 
-
-{-| A skeleton for parsed markdown
 -}
-type MarkdownSkeleton a
-    = Heading { level : Block.HeadingLevel, rawText : String, children : List a }
-    | Paragraph (List a)
-    | BlockQuote (List a)
+type BlockStructure children
+    = Heading { level : Block.HeadingLevel, rawText : String, children : List children }
+    | Paragraph (List children)
+    | BlockQuote (List children)
     | Text String
     | CodeSpan String
-    | Strong (List a)
-    | Emphasis (List a)
-    | Link { title : Maybe String, destination : String, children : List a }
+    | Strong (List children)
+    | Emphasis (List children)
+    | Link { title : Maybe String, destination : String, children : List children }
     | Image { alt : String, src : String, title : Maybe String }
-    | UnorderedList { items : List (ListItem a) }
-    | OrderedList { startingIndex : Int, items : List (List a) }
+    | UnorderedList { items : List (ListItem children) }
+    | OrderedList { startingIndex : Int, items : List (List children) }
     | CodeBlock { body : String, language : Maybe String }
     | HardLineBreak
     | ThematicBreak
@@ -84,9 +72,22 @@ type MarkdownSkeleton a
 
 {-| This renders markdown to `Html` in an attempt to be as close as possible to
 the HTML output in <https://github.github.com/gfm/>.
+
+Keep in mind that you can validate markdown blocks before rendering, but if you
+don't need validation, you need to convert this function's return type to a
+`Result String (Html msg)`. You can do this by simply wrapping `>> Ok` around
+your html results like so:
+
+    render
+        { renderBlocks = renderToHtml >> Ok
+        , renderHtml = Markdown.Html.oneOf []
+        }
+
+See (`BlockStructure`)[#BlockStructure]
+
 -}
-renderMarkdownDefault : MarkdownSkeleton (Html msg) -> Html msg
-renderMarkdownDefault markdown =
+renderToHtml : BlockStructure (Html msg) -> Html msg
+renderToHtml markdown =
     case markdown of
         Heading { level, rawText, children } ->
             case level of
@@ -255,28 +256,28 @@ renderSingleInline renderer inline =
         Block.Strong innerInlines ->
             innerInlines
                 |> renderStyled renderer
-                |> Result.andThen (Strong >> renderer.renderMarkdown)
+                |> Result.andThen (Strong >> renderer.renderBlocks)
                 |> Just
 
         Block.Emphasis innerInlines ->
             innerInlines
                 |> renderStyled renderer
-                |> Result.andThen (Emphasis >> renderer.renderMarkdown)
+                |> Result.andThen (Emphasis >> renderer.renderBlocks)
                 |> Just
 
         Block.Image src title children ->
             Image { alt = Block.extractText children, src = src, title = title }
-                |> renderer.renderMarkdown
+                |> renderer.renderBlocks
                 |> Just
 
         Block.Text string ->
             Text string
-                |> renderer.renderMarkdown
+                |> renderer.renderBlocks
                 |> Just
 
         Block.CodeSpan string ->
             CodeSpan string
-                |> renderer.renderMarkdown
+                |> renderer.renderBlocks
                 |> Just
 
         Block.Link destination title inlines ->
@@ -284,13 +285,13 @@ renderSingleInline renderer inline =
                 |> Result.andThen
                     (\children ->
                         Link { title = title, destination = destination, children = children }
-                            |> renderer.renderMarkdown
+                            |> renderer.renderBlocks
                     )
                 |> Just
 
         Block.HardLineBreak ->
             HardLineBreak
-                |> renderer.renderMarkdown
+                |> renderer.renderBlocks
                 |> Just
 
         Block.HtmlInline html ->
@@ -333,13 +334,13 @@ renderHelper renderer blocks =
                                     , rawText = Block.extractText content
                                     , children = children
                                     }
-                                    |> renderer.renderMarkdown
+                                    |> renderer.renderBlocks
                             )
                         |> Just
 
                 Block.Paragraph content ->
                     renderStyled renderer content
-                        |> Result.andThen (Paragraph >> renderer.renderMarkdown)
+                        |> Result.andThen (Paragraph >> renderer.renderBlocks)
                         |> Just
 
                 Block.HtmlBlock html ->
@@ -363,7 +364,7 @@ renderHelper renderer blocks =
                         |> Result.andThen
                             (\children ->
                                 UnorderedList { items = children }
-                                    |> renderer.renderMarkdown
+                                    |> renderer.renderBlocks
                             )
                         |> Just
 
@@ -374,24 +375,24 @@ renderHelper renderer blocks =
                         |> Result.andThen
                             (\children ->
                                 OrderedList { startingIndex = startingIndex, items = children }
-                                    |> renderer.renderMarkdown
+                                    |> renderer.renderBlocks
                             )
                         |> Just
 
                 Block.CodeBlock codeBlock ->
                     CodeBlock codeBlock
-                        |> renderer.renderMarkdown
+                        |> renderer.renderBlocks
                         |> Just
 
                 Block.ThematicBreak ->
                     ThematicBreak
-                        |> renderer.renderMarkdown
+                        |> renderer.renderBlocks
                         |> Just
 
                 Block.BlockQuote nestedBlocks ->
                     renderHelper renderer nestedBlocks
                         |> combineResults
-                        |> Result.andThen (BlockQuote >> renderer.renderMarkdown)
+                        |> Result.andThen (BlockQuote >> renderer.renderBlocks)
                         |> Just
         )
         blocks
